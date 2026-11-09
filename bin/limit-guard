@@ -1,0 +1,133 @@
+#!/bin/bash
+# limit-guard: deterministic usage supervisor for local Claude Code agents.
+# Pauses agents (checkpoint first) before the 5-hour / 7-day plan limits and resumes them after the reset.
+
+LG_SELF="$0"
+while [ -L "$LG_SELF" ]; do
+  link="$(readlink "$LG_SELF")"
+  case "$link" in /*) LG_SELF="$link" ;; *) LG_SELF="$(dirname "$LG_SELF")/$link" ;; esac
+done
+LG_REPO="$(cd "$(dirname "$LG_SELF")/.." && pwd)"
+
+for f in common usage sessions guard hooks resume install; do
+  # shellcheck disable=SC1090
+  . "$LG_REPO/lib/$f.sh"
+done
+
+lg_status_short() {
+  local st u mode
+  st="$(lg_state)"; u="$(cat "$LG_HOME/usage.json" 2>/dev/null || echo '{}')"
+  mode="$(printf '%s' "$st" | jq -r '.mode // "running"')"
+  jq -rn --argjson s "$st" --argjson u "$u" --arg until "$(lg_fmt_time "$(printf '%s' "$st" | jq -r '.resume_at // empty')")" '
+    def p(w): if w == null then "–" else "\(w.pct | floor)%" end;
+    "5h \(p($u.five_hour)) · 7d \(p($u.seven_day))"
+    + (if $u.confidence == "low" then " (est)" else "" end)
+    + (if ($s.mode // "running") == "paused" then " · ⏸ paused until \($until)" else "" end)'
+}
+
+cmd_status() {
+  local json=0
+  [ "${1:-}" = "--json" ] && json=1
+  local st u d
+  st="$(lg_state)"; u="$(cat "$LG_HOME/usage.json" 2>/dev/null || echo 'null')"
+  d="$(cat "$LG_HOME/daemon.json" 2>/dev/null || echo '{}')"
+  if [ "$json" = 1 ]; then
+    jq -n --argjson s "$st" --argjson u "$u" --argjson d "$d" '{state: $s, usage: $u, daemon: $d}'
+    return
+  fi
+  echo "limit-guard: $(lg_status_short)"
+  printf '%s' "$u" | jq -r --argjson now "$(lg_now)" '
+    if . == null then "  usage: no data yet" else
+    "  usage: source=\(.source) confidence=\(.confidence) age=\($now - .observed_at)s\(if .stale then " STALE" else "" end)" end'
+  for w in five_hour seven_day; do
+    local r
+    r="$(printf '%s' "$u" | jq -r --arg w "$w" '.[$w].resets_at // empty' 2>/dev/null)"
+    [ -n "$r" ] && echo "  $w resets $(lg_fmt_time "$r")"
+  done
+  echo "  thresholds: 5h>=${LG_PAUSE_5H}% 7d>=${LG_PAUSE_7D}%"
+  printf '%s' "$st" | jq -r 'select(.mode == "paused") | "  paused: \(.reason // "") \(if .manual then "(manual)" else "" end)"'
+  local dpid
+  dpid="$(cat "$LG_HOME/.daemon.lock/pid" 2>/dev/null)"
+  if lg_pid_alive "$dpid"; then
+    printf '%s' "$d" | jq -r --argjson now "$(lg_now)" '"  daemon: pid \(.pid), last tick \($now - (.last_tick // $now))s ago, next in \((.next_tick // $now) - $now)s"'
+  else
+    echo "  daemon: NOT RUNNING"
+  fi
+  printf '%s' "$(lg_api_meta)" | jq -r 'select(.last_status) | "  usage api: \(.last_status)"'
+  echo "  sessions:"
+  cmd_sessions | sed 's/^/    /'
+}
+
+cmd_sessions() {
+  local f any=0
+  for f in "$LG_HOME"/sessions/*.json; do
+    [ -s "$f" ] || continue
+    jq -r 'select(.status != "ended") | "\(.status | .[0:20])\t\(.kind)\t\(.session_id[0:8])\t\(.cwd // "?")"' "$f"
+    any=1
+  done | column -t -s "$(printf '\t')"
+  [ "$any" = 1 ] || true
+}
+
+cmd_pause() {
+  local reason="${*:-manual}"
+  lg_pause "$reason" null true '[]'
+  echo "paused (manual). Run 'limit-guard resume' to resume."
+}
+
+cmd_resume() {
+  if [ "${1:-}" = "--force" ] || [ "$(lg_state_mode)" = "paused" ]; then
+    lg_resume_all "manual"
+    echo "resumed."
+  else
+    echo "not paused."
+  fi
+}
+
+usage() {
+  cat <<'EOF'
+limit-guard — pause Claude Code agents before plan limits, resume after reset.
+
+  limit-guard status [--json]   current usage, state, daemon and sessions
+  limit-guard sessions          tracked agent sessions
+  limit-guard poll              refresh usage once (at most one API call) and print it
+  limit-guard tick              run one supervision step (what the daemon does each heartbeat)
+  limit-guard poke              wake the daemon for an immediate tick
+  limit-guard pause [reason]    pause manually (stays paused until `resume`)
+  limit-guard resume [--force]  resume now and send resume prompts to paused agents
+  limit-guard daemon            run the supervisor loop (launchd runs this)
+  limit-guard install [all|hooks|daemon]   symlink CLI, add hooks/statusline, load launchd agent
+  limit-guard uninstall         remove hooks, statusline and launchd agent (keeps state)
+  limit-guard log [-f]          show the log
+  limit-guard hook              (Claude Code hook entrypoint, reads JSON on stdin)
+  limit-guard statusline        (Claude Code statusline entrypoint)
+  limit-guard ingest-stream     pass `claude -p --output-format stream-json` through, capturing usage
+
+Unguarded one-off session: LIMIT_GUARD_DISABLE=1 claude ...
+EOF
+}
+
+main() {
+  local cmd="${1:-status}"
+  [ $# -gt 0 ] && shift
+  lg_init
+  case "$cmd" in
+    hook)        lg_hook 2>/dev/null; exit 0 ;;
+    statusline)  lg_statusline 2>/dev/null; exit 0 ;;
+    ingest-stream) lg_ingest_stream ;;
+    status)      cmd_status "$@" ;;
+    sessions)    cmd_sessions ;;
+    poll)        lg_usage_refresh ;;
+    tick)        LG_COMPONENT=tick; echo "next heartbeat: $(lg_tick)s"; cmd_status ;;
+    poke)        touch "$LG_HOME/.wake"; echo "daemon will tick within 5s" ;;
+    pause)       cmd_pause "$@" ;;
+    resume)      cmd_resume "$@" ;;
+    daemon)      lg_daemon ;;
+    install)     lg_install "$LG_REPO" "$@" ;;
+    uninstall)   lg_uninstall ;;
+    log)         if [ "${1:-}" = "-f" ]; then tail -f "$LG_HOME/limit-guard.log"; else tail -n 50 "$LG_HOME/limit-guard.log"; fi ;;
+    help|-h|--help) usage ;;
+    *) usage; exit 1 ;;
+  esac
+}
+
+main "$@"
