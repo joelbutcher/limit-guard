@@ -55,10 +55,19 @@ lg_die() { echo "limit-guard: $*" >&2; exit 1; }
 
 # Write stdin to a file atomically (same-directory temp + rename).
 lg_write() {
-  local target="$1" tmp
+  local target="$1" tmp mode link
+  # Write through symlinks (e.g. a dotfiles-managed settings.json) instead of replacing them.
+  while [ -L "$target" ]; do
+    link="$(readlink "$target")"
+    case "$link" in /*) target="$link" ;; *) target="$(dirname "$target")/$link" ;; esac
+  done
   tmp="$(mktemp "${target}.XXXXXX")" || return 1
-  # Keep an existing file's mode (e.g. settings.json); new files stay owner-only.
-  [ -e "$target" ] && chmod "$(stat -f %Lp "$target")" "$tmp" 2>/dev/null
+  # Keep an existing regular file's mode, capped at 0644 (never execute, never group/other write).
+  # New files stay owner-only.
+  if [ -f "$target" ]; then
+    mode="$(stat -f %Lp "$target" 2>/dev/null)"
+    [ -n "$mode" ] && chmod "$(printf '%o' $(( 0$mode & 0644 )))" "$tmp" 2>/dev/null
+  fi
   cat > "$tmp" && mv -f "$tmp" "$target"
 }
 

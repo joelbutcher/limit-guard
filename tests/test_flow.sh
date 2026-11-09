@@ -66,6 +66,16 @@ test_state_is_owner_only_and_settings_keep_their_mode() {
   assert_eq "$(stat -f %Lp "$HOME/settings.json")" "644"
 }
 
+test_writes_go_through_symlinks_and_never_widen_permissions() {
+  mkdir -p "$HOME/dotfiles"
+  echo '{}' > "$HOME/dotfiles/settings.json"; chmod 775 "$HOME/dotfiles/settings.json"
+  ln -s ../dotfiles/settings.json "$HOME/.claude/settings.json"
+  lg_jq_update "$HOME/.claude/settings.json" '.a = 1'
+  [ -L "$HOME/.claude/settings.json" ] || fail "symlink was replaced"
+  assert_eq "$(jq -r .a "$HOME/dotfiles/settings.json")" "1"
+  assert_eq "$(stat -f %Lp "$HOME/dotfiles/settings.json")" "644"
+}
+
 test_notification_text_is_passed_as_an_argument_not_script() {
   LG_NOTIFY=1 lg_notify 'quote " and \ and "& do shell script "touch /tmp/pwn"'
   local line; line="$(grep '^osascript' "$STUB_LOG")"
