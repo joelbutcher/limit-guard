@@ -45,9 +45,38 @@ test_headless_session_is_resumed_detached_with_its_original_flags() {
   local i; for i in 1 2 3 4 5 6 7 8 9 10; do grep -q '^claude' "$STUB_LOG" && break; /bin/sleep 0.1; done
   local log; log="$(grep '^claude' "$STUB_LOG")"
   assert_contains "$log" "CWD=$TEST_ROOT/work"
-  assert_contains "$log" "-p --resume h1 --model opus --permission-mode acceptEdits --output-format stream-json --verbose --dangerously-skip-permissions [limit-guard:resume]"
+  assert_contains "$log" "-p --resume h1 --model opus --output-format stream-json --verbose [limit-guard:resume]"
   assert_not_contains "$log" "do-it" "original prompt must not be replayed"
   assert_not_contains "$log" "allowedTools" "non-whitelisted flags are dropped"
+  assert_not_contains "$log" "dangerously" "permission flags are never recovered from ps"
+  assert_not_contains "$log" "permission-mode" "permission flags are never recovered from ps"
+}
+
+test_flag_lookalikes_inside_a_prompt_cannot_inject_values() {
+  local f
+  f="$(lg_headless_flags '/x/claude -p explain --model $(rm -rf ~) and --effort ultra and --max-turns 9999999 and * glob')"
+  assert_empty "$f" "nothing invalid may be recovered"
+  f="$(cd "$TEST_ROOT" && touch a b && lg_headless_flags '/x/claude -p * --model haiku')"
+  assert_eq "$f" "$(printf -- '--model\nhaiku')"
+}
+
+test_permission_flags_come_only_from_explicit_config() {
+  make_session h1 headless paused
+  echo '{"type":"assistant"}' > "$TEST_ROOT/work/t.jsonl"
+  LG_HEADLESS_RESUME_FLAGS="--permission-mode acceptEdits" LG_TEST_ALIVE="" lg_resume_session h1
+  local i; for i in 1 2 3 4 5 6 7 8 9 10; do grep -q '^claude' "$STUB_LOG" && break; /bin/sleep 0.1; done
+  assert_contains "$(grep '^claude' "$STUB_LOG")" "--verbose --permission-mode acceptEdits [limit-guard:resume]"
+}
+
+test_resume_prompt_with_quotes_and_spaces_stays_one_argument() {
+  make_session h1 headless deferred '{"deferred_prompt":"fix \"the\" bug; rm -rf / && echo $HOME"}'
+  cat > "$STUB_DIR/claude" <<'EOF'
+#!/bin/bash
+echo "claude ARGC=$# LAST=${!#}" >> "$STUB_LOG"
+EOF
+  LG_TEST_ALIVE="" lg_resume_session h1
+  local i; for i in 1 2 3 4 5 6 7 8 9 10; do grep -q '^claude' "$STUB_LOG" && break; /bin/sleep 0.1; done
+  assert_contains "$(grep '^claude' "$STUB_LOG")" 'LAST=fix "the" bug; rm -rf / && echo $HOME'
 }
 
 test_headless_session_still_running_is_retried_not_duplicated() {

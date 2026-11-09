@@ -25,21 +25,32 @@ lg_tmux() {
   if [ -n "$sock" ] && [ "$sock" != "null" ]; then tmux -S "$sock" "$@"; else tmux "$@"; fi
 }
 
-# Whitelisted flags from the original `claude -p` command line, re-used on resume.
+# Harmless flags recovered from the original `claude -p` command line, one per line.
+# `ps` output loses quoting, so prompt text could look like flags: only flags that cannot
+# widen what the agent may do are recovered, and each value must match a strict pattern.
+# Permission flags (--dangerously-skip-permissions, --permission-mode, --allowedTools, --add-dir)
+# are NEVER recovered; declare them explicitly in LG_HEADLESS_RESUME_FLAGS if you want them.
 lg_headless_flags() {
-  local argv="$1" prev='' tok out=''
-  for tok in $argv; do
+  local argv="$1" prev='' tok toks extra
+  # read -a splits on whitespace without glob expansion (a bare * in a prompt stays a *).
+  read -r -a toks <<< "$argv"
+  for tok in ${toks[@]+"${toks[@]}"}; do
     case "$prev" in
-      --model|--permission-mode|--max-turns|--effort|--output-format|--fallback-model|--add-dir)
-        out="$out $prev $tok" ;;
+      --model|--fallback-model)
+        printf '%s' "$tok" | grep -Eq '^[A-Za-z0-9._:-]{1,64}$' && printf '%s\n%s\n' "$prev" "$tok" ;;
+      --effort)
+        case "$tok" in low|medium|high|xhigh|max) printf '%s\n%s\n' "$prev" "$tok" ;; esac ;;
+      --output-format)
+        case "$tok" in text|json|stream-json) printf '%s\n%s\n' "$prev" "$tok" ;; esac ;;
+      --max-turns)
+        printf '%s' "$tok" | grep -Eq '^[0-9]{1,4}$' && printf '%s\n%s\n' "$prev" "$tok" ;;
     esac
-    case "$tok" in
-      --dangerously-skip-permissions|--verbose) out="$out $tok" ;;
-      --model=*|--permission-mode=*|--max-turns=*|--effort=*|--output-format=*|--fallback-model=*) out="$out $tok" ;;
-    esac
+    [ "$tok" = "--verbose" ] && printf '%s\n' "$tok"
     prev="$tok"
   done
-  echo "$out"
+  # Explicit, user-declared extra flags (config.env), split on whitespace.
+  read -r -a extra <<< "${LG_HEADLESS_RESUME_FLAGS:-}"
+  for tok in ${extra[@]+"${extra[@]}"}; do printf '%s\n' "$tok"; done
 }
 
 lg_transcript_has_turns() {
@@ -75,7 +86,8 @@ lg_resume_tmux() {
 }
 
 lg_resume_headless() {
-  local s="$1" prompt="$2" id pid cwd argv flags transcript log
+  local s="$1" prompt="$2" id pid cwd argv transcript log flag
+  local flags=()
   id="$(printf '%s' "$s" | jq -r .session_id)"
   pid="$(printf '%s' "$s" | jq -r '.pid // empty')"
   cwd="$(printf '%s' "$s" | jq -r '.cwd // empty')"
@@ -84,19 +96,21 @@ lg_resume_headless() {
   # Never run two processes on one session.
   lg_pid_alive "$pid" && return 2
   [ -d "$cwd" ] || return 1
-  flags="$(lg_headless_flags "$argv")"
+  while IFS= read -r flag; do
+    [ -n "$flag" ] && flags[${#flags[@]}]="$flag"
+  done <<EOF
+$(lg_headless_flags "$argv")
+EOF
   log="$LG_HOME/logs/$id.resume.log"
   printf '\n=== %s resume ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$log"
   if lg_transcript_has_turns "$transcript"; then
-    # shellcheck disable=SC2086
-    (cd "$cwd" && nohup "$LG_CLAUDE_BIN" -p --resume "$id" $flags "$prompt" >> "$log" 2>&1 &)
+    (cd "$cwd" && nohup "$LG_CLAUDE_BIN" -p --resume "$id" ${flags[@]+"${flags[@]}"} "$prompt" >> "$log" 2>&1 &)
   else
     # Blocked before its first turn: run the saved prompt as a fresh headless session.
     prompt="$(printf '%s' "$s" | jq -r '.deferred_prompt // empty')"
     [ -n "$prompt" ] || return 1
     LG_RESUMED_FRESH=1
-    # shellcheck disable=SC2086
-    (cd "$cwd" && nohup "$LG_CLAUDE_BIN" -p $flags "$prompt" >> "$log" 2>&1 &)
+    (cd "$cwd" && nohup "$LG_CLAUDE_BIN" -p ${flags[@]+"${flags[@]}"} "$prompt" >> "$log" 2>&1 &)
   fi
   return 0
 }

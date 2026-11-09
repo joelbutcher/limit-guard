@@ -73,10 +73,14 @@ Any hook failure exits 0 with no output, so a limit-guard bug can never block yo
   If Claude has exited, runs `claude --resume <id> "<prompt>"` in the pane's shell.
 - **headless** (`claude -p`): once the old process is gone, runs
   `claude -p --resume <id> <flags> "<prompt>"` detached in the session's cwd, logging to
-  `~/.claude/limit-guard/logs/<id>.resume.log`. Re-used flags are `--model`, `--permission-mode`,
-  `--max-turns`, `--effort`, `--output-format`, `--fallback-model`, `--add-dir`, `--verbose` and
-  `--dangerously-skip-permissions`. A session blocked before its first turn is re-run fresh with
-  its saved prompt.
+  `~/.claude/limit-guard/logs/<id>.resume.log`. Only harmless flags are recovered from the
+  original command line (`--model`, `--fallback-model`, `--effort`, `--output-format`,
+  `--max-turns`, `--verbose`), and each value must match a strict pattern. `ps` loses quoting,
+  so text inside a prompt can look like a flag. **Permission flags are never recovered**
+  (`--dangerously-skip-permissions`, `--permission-mode`, `--allowedTools`, `--add-dir`).
+  To resume with them, declare them in `config.env`, for example
+  `LG_HEADLESS_RESUME_FLAGS="--permission-mode acceptEdits"`. A session blocked before its first
+  turn is re-run fresh with its saved prompt.
 - **desktop app / plain terminal**: limit-guard can pause these but cannot type into them. It
   sends a macOS notification naming them so you can continue them by hand.
 
@@ -107,6 +111,8 @@ clock is fixed via `LG_NOW`.
 
 - `/api/oauth/usage` is undocumented and may change. limit-guard degrades to the statusline,
   stream and estimate sources.
-- Headless resume re-uses only whitelisted flags. The original command line is read from `ps`,
-  which loses quoting, so wrap complex invocations in a script if you need more.
+- Headless resume re-uses only the harmless flags listed above. Anything else goes in
+  `LG_HEADLESS_RESUME_FLAGS`.
+- `~/.claude/limit-guard` is owner-only (`umask 077`, directories `700`), because session files
+  hold command lines and saved prompts.
 - A turn that produces no tool calls cannot be interrupted; it finishes, then is held at its next prompt.

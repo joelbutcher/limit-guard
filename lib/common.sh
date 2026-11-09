@@ -33,9 +33,13 @@ lg_load_config() {
 }
 
 lg_init() {
+  # Session files hold command lines and saved prompts; checkpoints hold work notes. Owner only.
+  umask 077
   mkdir -p "$LG_HOME/sessions" "$LG_HOME/samples" "$LG_HOME/logs" 2>/dev/null || true
+  chmod 700 "$LG_HOME" 2>/dev/null || true
   lg_load_config
   mkdir -p "$LG_CHECKPOINT_DIR" 2>/dev/null || true
+  chmod 700 "$LG_CHECKPOINT_DIR" 2>/dev/null || true
 }
 
 lg_now() {
@@ -53,6 +57,8 @@ lg_die() { echo "limit-guard: $*" >&2; exit 1; }
 lg_write() {
   local target="$1" tmp
   tmp="$(mktemp "${target}.XXXXXX")" || return 1
+  # Keep an existing file's mode (e.g. settings.json); new files stay owner-only.
+  [ -e "$target" ] && chmod "$(stat -f %Lp "$target")" "$tmp" 2>/dev/null
   cat > "$tmp" && mv -f "$tmp" "$target"
 }
 
@@ -106,6 +112,8 @@ lg_notify() {
   local msg="$1"
   lg_log "notify: $msg"
   if command -v osascript >/dev/null 2>&1; then
-    osascript -e "display notification \"${msg//\"/\\\"}\" with title \"limit-guard\"" >/dev/null 2>&1 || true
+    # Message passed as an argument, never interpolated into the script.
+    osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "limit-guard"' -e 'end run' \
+      "$msg" >/dev/null 2>&1 || true
   fi
 }

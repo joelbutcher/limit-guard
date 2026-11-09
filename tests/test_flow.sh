@@ -55,6 +55,24 @@ test_manual_pause_and_resume() {
   assert_eq "$(lg_state_mode)" "running"
 }
 
+test_state_is_owner_only_and_settings_keep_their_mode() {
+  "$LG" status >/dev/null
+  assert_eq "$(stat -f %Lp "$LG_HOME")" "700"
+  assert_eq "$(stat -f %Lp "$LG_HOME/checkpoints")" "700"
+  hook_input SessionStart s1 | run_hook >/dev/null
+  assert_eq "$(stat -f %Lp "$LG_HOME/sessions/s1.json")" "600"
+  echo '{}' > "$HOME/settings.json"; chmod 644 "$HOME/settings.json"
+  lg_jq_update "$HOME/settings.json" '.a = 1'
+  assert_eq "$(stat -f %Lp "$HOME/settings.json")" "644"
+}
+
+test_notification_text_is_passed_as_an_argument_not_script() {
+  LG_NOTIFY=1 lg_notify 'quote " and \ and "& do shell script "touch /tmp/pwn"'
+  local line; line="$(grep '^osascript' "$STUB_LOG")"
+  assert_contains "$line" "display notification (item 1 of argv)"
+  assert_contains "$line" 'end run quote " and \ and "& do shell script'
+}
+
 test_status_renders_without_data() {
   local out; out="$("$LG" status)"
   assert_contains "$out" "limit-guard: 5h – · 7d –"
