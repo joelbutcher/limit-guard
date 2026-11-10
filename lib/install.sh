@@ -99,8 +99,26 @@ EOF
   launchctl bootstrap "gui/$(id -u)" "$LG_PLIST"
 }
 
+# Hard requirements fail the install; things that only limit features are warnings.
+lg_preflight() {
+  local jq_bin="${LG_PREFLIGHT_JQ:-jq}" ok=0
+  if ! command -v "$jq_bin" >/dev/null 2>&1; then
+    echo "✗ jq is required (built into macOS 15+; otherwise: brew install jq)" >&2; ok=1
+  fi
+  command -v curl >/dev/null 2>&1 || { echo "✗ curl is required" >&2; ok=1; }
+  if [ ! -x "$HOME/.local/bin/claude" ] && ! command -v claude >/dev/null 2>&1; then
+    echo "! claude not found: install Claude Code first, or set LG_CLAUDE_BIN in $LG_HOME/config.env" >&2
+  fi
+  case ":$PATH:" in
+    *":$(dirname "$LG_BIN_LINK"):"*) ;;
+    *) echo "! $(dirname "$LG_BIN_LINK") is not on your PATH: add it to use the limit-guard command (hooks and the daemon work regardless)" >&2 ;;
+  esac
+  return "$ok"
+}
+
 lg_install() {
   local repo="$1" what="${2:-all}"
+  lg_preflight || return 1
   mkdir -p "$(dirname "$LG_BIN_LINK")"
   ln -sfn "$repo/bin/limit-guard" "$LG_BIN_LINK"
   echo "✓ $LG_BIN_LINK -> $repo/bin/limit-guard"

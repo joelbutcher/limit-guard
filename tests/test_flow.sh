@@ -113,3 +113,15 @@ EOF
   assert_eq "$(jqv "$s" .statusLine.command)" "~/my-status.sh"
   [ "$(ls "$HOME/.claude/" | grep -c 'settings.json.bak-limit-guard')" -ge 1 ] || fail "no backup written"
 }
+
+test_install_refuses_without_jq_and_warns_about_missing_claude_and_path() {
+  export LG_SETTINGS="$HOME/.claude/settings.json" LG_PLIST="$TEST_ROOT/plist" LG_BIN_LINK="$HOME/.local/bin/limit-guard"
+  local out
+  out="$(LG_PREFLIGHT_JQ=/nonexistent/jq lg_preflight 2>&1)"; local rc=$?
+  assert_eq "$rc" "1"
+  assert_contains "$out" "jq is required"
+  out="$(PATH="/usr/bin:/bin" LG_PREFLIGHT_JQ=jq lg_preflight 2>&1)"; rc=$?
+  assert_eq "$rc" "0" "missing claude and PATH entry are warnings, not errors"
+  assert_contains "$out" "claude not found"
+  assert_contains "$out" "$HOME/.local/bin is not on your PATH"
+}

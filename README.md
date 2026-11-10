@@ -1,127 +1,147 @@
 # limit-guard
 
-A small, deterministic supervisor for local Claude Code agents. It watches Claude plan usage
-(5-hour and 7-day windows), tells running agents to checkpoint and stop **before** a limit is hit,
-waits for the reset, then resumes every agent it paused.
+Stop your Claude Code agents from hitting the plan usage limit mid-task.
 
-It is bash + jq + curl, a launchd daemon and Claude Code hooks. It is **not** a Claude session,
-so supervising costs no quota.
+limit-guard watches your Claude plan usage (the 5-hour and 7-day windows). Just before a limit is
+reached it tells every running agent to write a checkpoint and stop cleanly. When the window resets,
+it starts them again from their checkpoints.
 
+It is a small macOS background service written in bash, plus Claude Code hooks. It is **not** a
+Claude session itself, so watching your usage costs no quota.
+
+```text
+$ limit-guard status
+limit-guard: 5h 62% · 7d 34%
+  usage: source=api confidence=high age=41s
+  five_hour resets 14:00
+  seven_day resets Sat 02:00
+  thresholds: 5h>=95% 7d>=95%
+  daemon: pid 65276, last tick 40s ago, next in 560s
+  sessions:
+    active   background  45115dbd  /Users/you/Projects/api
+    active   tmux        8b13d808  /Users/you/Projects/web
+    active   desktop     9d4451d1  /Users/you/Projects/infra
 ```
-limit-guard status          # usage, state, daemon, tracked sessions
-limit-guard pause / resume  # manual control
-limit-guard log -f          # what it decided and why
-```
 
-## How it works
+> **Unofficial.** limit-guard is a personal tool, not an Anthropic product. One of its usage sources
+> is an undocumented endpoint that may change. When that happens it falls back to its other sources
+> (see [How it works](docs/how-it-works.md)).
 
-```
- statusline ──► samples/statusline.json ─┐
- claude -p … | limit-guard ingest-stream ─┤   daemon (launchd, adaptive heartbeat)
-   ──► samples/stream.json ───────────────┼─► usage.json ─► decide ─► state.json (running|paused)
- GET /api/oauth/usage (≤1 per heartbeat) ─┤                              │
- transcript estimate (low confidence) ────┘                              ▼
-                                                    hooks read state.json on every event
-```
+## What happens at the limit
 
-**Usage sources**, best first. Every source is normalised to `{pct, resets_at(epoch)}` per window.
-`resets_at` arrives as epoch seconds, epoch milliseconds or ISO 8601, and all three are handled.
+When usage reaches **95%** of either window (configurable):
 
-1. **Statusline** `rate_limits.five_hour/seven_day`. limit-guard installs itself as the
-   statusline and chains to your previous one if you had one. Each refresh records a sample at no cost.
-2. **Headless stream events.** Pipe `claude -p --output-format stream-json --verbose` through
-   `limit-guard ingest-stream`; it passes output through unchanged and records `rate_limit_event` usage.
-3. **`GET https://api.anthropic.com/api/oauth/usage`**, the endpoint behind `/usage`. This endpoint
-   is undocumented, so treat it as best-effort. It is called only when no fresh sample exists, at most
-   once per `LG_API_MIN_INTERVAL`, and it backs off for 10 minutes after a 429. The OAuth token is
-   read from the Keychain (`Claude Code-credentials`), or from `~/.claude/.credentials.json`, at call
-   time and goes to curl on stdin. It is never in argv, never logged and never persisted.
-   An **expired token is never refreshed** by limit-guard, because refreshing would rotate it under
-   your agents. limit-guard falls back to its other sources instead.
-4. **Transcript estimate.** Weighted token counts from `~/.claude/projects/**/*.jsonl`,
-   de-duplicated by message id. limit-guard calibrates tokens-per-percent automatically from
-   high-confidence readings, and only uses this once a calibration exists. It is flagged
-   `confidence: low`.
+1. **New work stops.** An agent's next tool call is denied with an instruction to write a checkpoint
+   (goal, what is done, next steps, files touched, uncommitted state) and end its turn. New prompts
+   are held and saved.
+2. **It waits.** limit-guard sleeps until the window resets, plus 2 minutes.
+3. **Agents resume.** How depends on where the agent is running:
 
-**Decision.** limit-guard pauses when 5h ≥ `LG_PAUSE_5H` (default 95) or 7d ≥ `LG_PAUSE_7D` (default 95).
-`resume_at` is the latest reset among the tripped windows plus `LG_RESUME_GRACE`. After that time,
-fresh data that still shows a tripped window with a future reset extends the pause. Otherwise the
-clock is trusted (the window has rolled over) and every paused agent is resumed. A manual
-`limit-guard pause` never auto-resumes.
-
-**Heartbeat.** The interval shrinks as usage nears a threshold: 15 min when far away, then 10, 5
-and 2 min, and 1 min within 8 points. Low-confidence data caps it at 2 min. While paused, the
-daemon sleeps until the reset. A statusline or stream sample that crosses a threshold wakes the
-daemon immediately.
-
-**Hooks** (user `~/.claude/settings.json`; all are no-ops while running):
-
-| Event | While paused |
+| Where the agent runs | After the reset |
 | --- | --- |
-| `PreToolUse` | Denies with a `permissionDecisionReason` telling the agent to write a checkpoint to `~/.claude/limit-guard/checkpoints/<session>.md` and end its turn. Writing that file (and `TodoWrite`) is allowed. |
-| `Stop` | An agent that was told to checkpoint is now `paused`. An agent that simply finished its turn is not resumed later. |
-| `UserPromptSubmit` | Blocks new prompts and saves them. The saved prompt is delivered on resume. After the reset, the first prompt typed into a paused session is passed through with the checkpoint path and saved prompt added as context. |
-| `SessionStart` | Registers the session (pid, argv, kind, tmux pane) and injects a "paused" note. |
-| `SessionEnd` | Headless agents exit after pausing but stay resumable. |
+| `claude --bg` (background agents) | **Resumed automatically** in the same session, with the same settings. |
+| tmux pane | **Resumed automatically**: the resume prompt is typed into the pane. |
+| `claude -p` (headless) | **Resumed automatically** with `claude -p --resume`. |
+| Claude desktop app, or a plain terminal tab | **You continue it.** You get a notification naming the sessions. Send any message (`continue` is enough) and the agent is handed its checkpoint and anything you sent while it was paused. |
 
-Any hook failure exits 0 with no output, so a limit-guard bug can never block your agents.
-`LIMIT_GUARD_DISABLE=1 claude …` runs a session unguarded.
+**For unattended runs, such as overnight, start your agents with `claude --bg`.** You can still
+watch or take over any of them with `claude attach <id>`, and list them with `claude agents`.
 
-**Resume**, by session kind:
+## Requirements
 
-- **tmux**: types `[limit-guard:resume] … read your checkpoint …` into the pane and presses Enter.
-  If Claude has exited, runs `claude --resume <id> "<prompt>"` in the pane's shell.
-- **headless** (`claude -p`): once the old process is gone, runs
-  `claude -p --resume <id> <flags> "<prompt>"` detached in the session's cwd, logging to
-  `~/.claude/limit-guard/logs/<id>.resume.log`. Only harmless flags are recovered from the
-  original command line (`--model`, `--fallback-model`, `--effort`, `--output-format`,
-  `--max-turns`, `--verbose`), and each value must match a strict pattern. `ps` loses quoting,
-  so text inside a prompt can look like a flag. **Permission flags are never recovered**
-  (`--dangerously-skip-permissions`, `--permission-mode`, `--allowedTools`, `--add-dir`).
-  To resume with them, declare them in `config.env`, for example
-  `LG_HEADLESS_RESUME_FLAGS="--permission-mode acceptEdits"`. A session blocked before its first
-  turn is re-run fresh with its saved prompt.
-- **background** (`claude --bg`): the agent stays alive, idle at its prompt, after it stops. Once
-  its turn has ended, limit-guard runs `claude stop <id>`, waits for the process to exit, then runs
-  `claude --bg --resume <id> "<prompt>"` in the session's cwd. The background service restores the
-  session's own saved options (model, name, settings, permission mode); limit-guard adds no flags.
-  An agent still in its turn is retried on the next heartbeat rather than stopped. Watch or take
-  over with `claude attach <id>`. Run long agents this way to get unattended resume.
-- **desktop app / plain terminal**: limit-guard can pause these but cannot type into them. The
-  desktop app's session tools live inside the app and only a Claude session can call them. It
-  sends a macOS notification naming them. Send any message (for example `continue`) and the hook
-  hands the agent its checkpoint and any prompt saved while paused. Agents in these sessions are
-  told the user will continue them, never that the resume is automatic.
+- macOS, with the Claude desktop app or the Claude Code CLI signed in to a Claude subscription
+  (Pro, Max, Team or Enterprise). API-key billing has no plan windows to watch.
+- `jq` and `curl`. Both are built into macOS 15 and later. On older macOS, run `brew install jq`.
+- `~/.local/bin` on your `PATH`, so you can run the `limit-guard` command. Claude Code's installer
+  normally adds it.
 
 ## Install
 
 ```bash
-~/Projects/limit-guard/bin/limit-guard install   # symlink, config, hooks, statusline, launchd
-limit-guard uninstall                            # reverses it (state kept)
+git clone https://github.com/joelbutcher/limit-guard.git ~/.limit-guard
+~/.limit-guard/bin/limit-guard install
 ```
 
-- CLI: `~/.local/bin/limit-guard` (symlink)
-- State, config, logs: `~/.claude/limit-guard/` (`config.env`, `state.json`, `usage.json`,
-  `sessions/`, `checkpoints/`, `limit-guard.log`)
-- Daemon: `~/Library/LaunchAgents/com.limit-guard.daemon.plist` (`KeepAlive`, `RunAtLoad`)
-- `settings.json` is backed up as `settings.json.bak-limit-guard-<timestamp>` on every change.
+The installer:
 
-## Tests
+- links `~/.local/bin/limit-guard` to the clone, so keep the clone where it is;
+- writes your config to `~/.claude/limit-guard/config.env`;
+- adds five hooks and a statusline to `~/.claude/settings.json`, after backing it up to
+  `settings.json.bak-limit-guard-<timestamp>`. If you already had a statusline, it keeps working:
+  limit-guard shows its first line, followed by its own short summary;
+- starts the background service (a launchd agent), which also starts at login and restarts if it crashes.
+
+**Restart any Claude sessions that are already open**, so they load the new hooks. Then check it:
 
 ```bash
-tests/run.sh            # all
-tests/run.sh decide     # filter by name
+limit-guard status
 ```
 
-The tests run offline. `security`, `curl`, `tmux`, `claude` and `osascript` are PATH stubs, and the
-clock is fixed via `LG_NOW`.
+The `daemon:` line should show a pid, and within a minute `usage:` should show a percentage.
 
-## Known limits
+### Update
 
-- `/api/oauth/usage` is undocumented and may change. limit-guard degrades to the statusline,
-  stream and estimate sources.
-- Headless resume re-uses only the harmless flags listed above. Anything else goes in
-  `LG_HEADLESS_RESUME_FLAGS`.
-- `~/.claude/limit-guard` is owner-only (`umask 077`, directories `700`), because session files
-  hold command lines and saved prompts.
-- A turn that produces no tool calls cannot be interrupted; it finishes, then is held at its next prompt.
+```bash
+git -C ~/.limit-guard pull
+limit-guard install daemon
+```
+
+### Uninstall
+
+```bash
+limit-guard uninstall
+```
+
+This removes the hooks, the statusline entry (restoring yours if you had one), the background service
+and the symlink. Your state in `~/.claude/limit-guard/` is kept; delete it if you don't want it.
+
+## Everyday use
+
+```bash
+limit-guard status            # usage, pause state, tracked sessions
+limit-guard log -f            # follow what it decides and why
+limit-guard pause "lunch"     # pause everything now; stays paused until you resume
+limit-guard resume            # resume now and restart paused agents
+limit-guard resume --force    # resume even if usage still looks over the limit
+LIMIT_GUARD_DISABLE=1 claude  # run one session without limit-guard
+```
+
+To change the thresholds, edit `~/.claude/limit-guard/config.env` and run `limit-guard install daemon`:
+
+```bash
+LG_PAUSE_5H=95   # pause at this % of the 5-hour window
+LG_PAUSE_7D=95   # pause at this % of the 7-day window
+```
+
+All settings are listed in [Configuration](docs/configuration.md).
+
+## Good to know
+
+- **A pause applies to every agent on your Mac**, including the session you're typing in. If you
+  need to get something done while paused, use `limit-guard resume --force`, or start that one
+  session with `LIMIT_GUARD_DISABLE=1`.
+- **An agent that is only writing text can't be stopped mid-reply.** Pausing works by denying tool
+  calls, so the agent finishes its reply and is held at its next prompt.
+- **Agents are asked to checkpoint; they aren't forced to.** In practice they write good checkpoints,
+  but an agent can end its turn without one. On resume it is told to re-check the current state first.
+- **Usage is shared across your devices.** Usage from claude.ai or another machine counts too, and
+  limit-guard sees it, but it can only pause agents on this Mac.
+
+## Documentation
+
+- [How it works](docs/how-it-works.md): usage sources, the pause decision, hooks, and how each
+  kind of session is resumed.
+- [Configuration](docs/configuration.md): every setting and file.
+- [Troubleshooting](docs/troubleshooting.md): common situations and what to do.
+- [Privacy and security](docs/how-it-works.md#privacy-and-security): what it reads, and what it never stores.
+
+## Development
+
+```bash
+tests/run.sh          # the whole suite, offline (about 15s)
+tests/run.sh resume   # only tests whose name matches
+```
+
+The tests stub `security`, `curl`, `tmux`, `claude` and `osascript`, and fix the clock with `LG_NOW`,
+so they never touch your real Claude setup or quota. The code is bash 3.2 compatible, matching
+macOS's `/bin/bash`.
