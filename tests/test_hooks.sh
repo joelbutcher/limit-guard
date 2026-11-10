@@ -170,3 +170,17 @@ test_an_idle_session_gets_no_resume_context() {
   out="$(hook_input UserPromptSubmit d1 '{"prompt":"hello"}' | run_hook)"
   assert_empty "$out"
 }
+
+test_background_sessions_are_recognised_and_promised_an_automatic_resume() {
+  assert_eq "$(lg_classify 'claude bg-spare --bg-spare /tmp/cc-daemon-502/x/spare/a.claim.sock')" "background"
+  assert_eq "$(TMUX_PANE=%1 lg_classify 'claude bg-spare --bg-spare /tmp/a.claim.sock')" "background"
+  lg_is_claude_comm "claude bg-spare" || fail "a background session process is a claude process"
+  lg_is_claude_comm "/Users/x/.local/bin/claude" || fail "plain claude binary"
+  lg_is_claude_comm "claude bg-pty-host" && fail "the pty host is not the session"
+  LG_TEST_PID=4242 LG_TEST_ARGV="claude bg-spare --bg-spare /tmp/a.claim.sock" \
+    run_hook < <(hook_input SessionStart b1) >/dev/null
+  pause_now
+  local out
+  out="$(hook_input PreToolUse b1 '{"tool_name":"Bash"}' | run_hook)"
+  assert_contains "$(jqv "$out" .hookSpecificOutput.permissionDecisionReason)" "resume this session automatically"
+}

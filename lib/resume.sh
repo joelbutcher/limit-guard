@@ -115,6 +115,42 @@ EOF
   return 0
 }
 
+# Background sessions (`claude --bg`) stay alive, idle at their prompt, after the agent stops.
+# Stop the idle process, then wake the same session with the prompt. The background service
+# restores the session's own saved options (model, name, permission mode); limit-guard adds none.
+lg_resume_background() {
+  local s="$1" prompt="$2" id status pid cwd transcript log i
+  id="$(printf '%s' "$s" | jq -r .session_id)"
+  status="$(printf '%s' "$s" | jq -r '.status // empty')"
+  pid="$(printf '%s' "$s" | jq -r '.pid // empty')"
+  cwd="$(printf '%s' "$s" | jq -r '.cwd // empty')"
+  transcript="$(printf '%s' "$s" | jq -r '.transcript_path // empty')"
+  [ -d "$cwd" ] || return 1
+  if lg_pid_alive "$pid"; then
+    # Only a session whose turn has ended (Stop hook fired) is safe to stop.
+    case "$status" in paused|deferred) ;; *) return 2 ;; esac
+    "$LG_CLAUDE_BIN" stop "${id:0:8}" >/dev/null 2>&1
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+      lg_pid_alive "$pid" || break
+      sleep 1
+    done
+    lg_pid_alive "$pid" && return 2
+  fi
+  log="$LG_HOME/logs/$id.resume.log"
+  printf '\n=== %s background resume ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$log"
+  # A background session's transcript holds its settings even before the first turn, so resume it whenever
+  # one exists; the resume prompt carries any prompt saved while paused.
+  if [ -s "$transcript" ]; then
+    (cd "$cwd" && "$LG_CLAUDE_BIN" --bg --resume "$id" "$prompt") >> "$log" 2>&1 || return 1
+  else
+    prompt="$(printf '%s' "$s" | jq -r '.deferred_prompt // empty')"
+    [ -n "$prompt" ] || return 1
+    LG_RESUMED_FRESH=1
+    (cd "$cwd" && "$LG_CLAUDE_BIN" --bg "$prompt") >> "$log" 2>&1 || return 1
+  fi
+  return 0
+}
+
 lg_resume_session() {
   local id="$1" s kind prompt rc attempts now
   s="$(lg_session_get "$id")"
@@ -126,6 +162,7 @@ lg_resume_session() {
   case "$kind" in
     tmux) lg_resume_tmux "$s" "$prompt"; rc=$? ;;
     headless) lg_resume_headless "$s" "$prompt"; rc=$? ;;
+    background) lg_resume_background "$s" "$prompt"; rc=$? ;;
     *) rc=3 ;;
   esac
   attempts="$(printf '%s' "$s" | jq -r '.resume_attempts // 0')"

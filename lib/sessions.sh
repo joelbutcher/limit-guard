@@ -17,14 +17,20 @@ lg_session_update() {
 }
 
 # Walk up from the hook's parent to the claude process. Tests may set LG_TEST_PID/LG_TEST_ARGV.
+# A background session (`claude --bg`) runs as "claude bg-spare", under a pty host and the claude daemon.
+lg_is_claude_comm() {
+  case "$1" in
+    */claude|claude|"claude bg-spare"|*/.local/share/claude/versions/*|*/claude-code/*/claude) return 0 ;;
+  esac
+  return 1
+}
+
 lg_find_claude_pid() {
   if [ -n "${LG_TEST_PID:-}" ]; then echo "$LG_TEST_PID"; return; fi
   local p="${PPID:-}" i=0 comm
   while [ -n "$p" ] && [ "$p" -gt 1 ] && [ "$i" -lt 8 ]; do
     comm="$(ps -o comm= -p "$p" 2>/dev/null)"
-    case "$comm" in
-      */claude|claude|*/.local/share/claude/versions/*|*/claude-code/*/claude) echo "$p"; return ;;
-    esac
+    if lg_is_claude_comm "$comm"; then echo "$p"; return; fi
     p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
     i=$((i + 1))
   done
@@ -47,6 +53,7 @@ lg_pid_alive() {
 lg_classify() {
   local argv="$1"
   case " $argv " in
+    *" bg-spare "*) echo background; return ;;
     *" --input-format stream-json "*|*" --input-format=stream-json "*) echo desktop; return ;;
     *" -p "*|*" --print "*) echo headless; return ;;
   esac

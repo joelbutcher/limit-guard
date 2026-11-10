@@ -111,3 +111,51 @@ test_deferred_prompt_is_delivered_on_resume() {
   LG_TEST_ALIVE=777 lg_resume_session t1
   assert_contains "$(cat "$STUB_LOG")" "act on it now: also bump the version"
 }
+
+bg_turns() { echo '{"type":"assistant"}' > "$TEST_ROOT/work/t.jsonl"; }
+
+test_idle_background_session_is_woken_with_the_resume_prompt() {
+  make_session 3e50417d-aaaa background paused '{"argv":"claude bg-spare --bg-spare /tmp/x.claim.sock"}'
+  bg_turns
+  LG_TEST_ALIVE="" lg_resume_session 3e50417d-aaaa
+  assert_eq "$?" "0"
+  local log; log="$(grep '^claude' "$STUB_LOG")"
+  assert_contains "$log" "CWD=$TEST_ROOT/work ARGS: --bg --resume 3e50417d-aaaa [limit-guard:resume]"
+  assert_not_contains "$log" "stop"
+  assert_not_contains "$log" "dangerously" "no flags are added; the session keeps its own saved options"
+  assert_eq "$(jqv "$(lg_session_get 3e50417d-aaaa)" .status)" "active"
+}
+
+test_background_session_idle_at_its_prompt_is_stopped_before_it_is_woken() {
+  make_session 3e50417d-aaaa background paused
+  bg_turns
+  LG_TEST_ALIVE=777 lg_resume_session 3e50417d-aaaa
+  assert_eq "$?" "2" "process never went away, so try again next tick"
+  assert_contains "$(grep '^claude' "$STUB_LOG")" "ARGS: stop 3e50417d"
+  assert_not_contains "$(cat "$STUB_LOG")" "--bg --resume"
+}
+
+test_background_session_still_in_its_turn_is_left_alone() {
+  make_session 3e50417d-aaaa background checkpoint_requested
+  LG_TEST_ALIVE=777 lg_resume_session 3e50417d-aaaa
+  assert_eq "$?" "2"
+  assert_not_contains "$(cat "$STUB_LOG")" "stop"
+}
+
+test_background_session_blocked_before_its_first_turn_is_resumed_with_the_saved_prompt() {
+  make_session 3e50417d-aaaa background deferred '{"deferred_prompt":"write the report"}'
+  echo '{"type":"session-owner"}' > "$TEST_ROOT/work/t.jsonl"
+  LG_TEST_ALIVE="" lg_resume_session 3e50417d-aaaa
+  assert_contains "$(grep '^claude' "$STUB_LOG")" "ARGS: --bg --resume 3e50417d-aaaa [limit-guard:resume]"
+  assert_contains "$(grep '^claude' "$STUB_LOG")" "act on it now: write the report"
+  assert_eq "$(jqv "$(lg_session_get 3e50417d-aaaa)" .status)" "active"
+}
+
+test_background_session_without_a_transcript_reruns_the_saved_prompt() {
+  make_session 3e50417d-aaaa background deferred '{"deferred_prompt":"write the report"}'
+  LG_TEST_ALIVE="" lg_resume_session 3e50417d-aaaa
+  local log; log="$(grep '^claude' "$STUB_LOG")"
+  assert_contains "$log" "ARGS: --bg write the report"
+  assert_not_contains "$log" "--resume"
+  assert_eq "$(jqv "$(lg_session_get 3e50417d-aaaa)" .superseded)" "true"
+}

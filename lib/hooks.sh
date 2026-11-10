@@ -13,7 +13,7 @@ lg_hook_paused_context() {
 # Only tmux and headless sessions can be driven from outside; desktop and plain terminal ones need the user.
 lg_hook_auto_resumable() {
   case "$(lg_session_get "$1" | jq -r '.kind // "terminal"' 2>/dev/null)" in
-    tmux|headless) return 0 ;;
+    tmux|headless|background) return 0 ;;
     *) return 1 ;;
   esac
 }

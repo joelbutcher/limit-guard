@@ -81,6 +81,12 @@ Any hook failure exits 0 with no output, so a limit-guard bug can never block yo
   To resume with them, declare them in `config.env`, for example
   `LG_HEADLESS_RESUME_FLAGS="--permission-mode acceptEdits"`. A session blocked before its first
   turn is re-run fresh with its saved prompt.
+- **background** (`claude --bg`): the agent stays alive, idle at its prompt, after it stops. Once
+  its turn has ended, limit-guard runs `claude stop <id>`, waits for the process to exit, then runs
+  `claude --bg --resume <id> "<prompt>"` in the session's cwd. The background service restores the
+  session's own saved options (model, name, settings, permission mode); limit-guard adds no flags.
+  An agent still in its turn is retried on the next heartbeat rather than stopped. Watch or take
+  over with `claude attach <id>`. Run long agents this way to get unattended resume.
 - **desktop app / plain terminal**: limit-guard can pause these but cannot type into them. The
   desktop app's session tools live inside the app and only a Claude session can call them. It
   sends a macOS notification naming them. Send any message (for example `continue`) and the hook
