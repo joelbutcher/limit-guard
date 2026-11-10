@@ -118,3 +118,55 @@ test_hook_survives_unwritable_state_dir() {
   # still denies (state is readable) even though the registry write failed
   assert_eq "$(jqv "$out" .hookSpecificOutput.permissionDecision)" "deny"
 }
+
+register_desktop() { # $1 session id
+  LG_TEST_PID=4242 LG_TEST_ARGV="/x/claude --output-format stream-json --verbose --input-format stream-json" \
+    run_hook < <(hook_input SessionStart "$1") >/dev/null
+}
+
+test_desktop_sessions_are_not_promised_an_automatic_resume() {
+  register_desktop d1
+  pause_now
+  local out
+  out="$(hook_input PreToolUse d1 '{"tool_name":"Bash"}' | run_hook)"
+  assert_contains "$(jqv "$out" .hookSpecificOutput.permissionDecisionReason)" "the user will continue this session"
+  assert_not_contains "$(jqv "$out" .hookSpecificOutput.permissionDecisionReason)" "automatically"
+  out="$(hook_input UserPromptSubmit d1 '{"prompt":"ship it"}' | run_hook)"
+  assert_contains "$(jqv "$out" .reason)" "send any message"
+  assert_not_contains "$(jqv "$out" .reason)" "automatically"
+}
+
+test_tmux_sessions_are_still_promised_an_automatic_resume() {
+  TMUX="/tmp/s,1,0" TMUX_PANE="%2" LG_TEST_PID=111 LG_TEST_ARGV="/x/claude" \
+    run_hook < <(hook_input SessionStart t1) >/dev/null
+  pause_now
+  local out
+  out="$(hook_input PreToolUse t1 '{"tool_name":"Bash"}' | run_hook)"
+  assert_contains "$(jqv "$out" .hookSpecificOutput.permissionDecisionReason)" "resume this session automatically"
+}
+
+test_continuing_a_desktop_session_by_hand_hands_it_the_checkpoint_and_saved_prompt() {
+  register_desktop d1
+  echo "# checkpoint" > "$LG_HOME/checkpoints/d1.md"
+  lg_session_update d1 '.status = "resume_failed" | .needs_manual = true | .deferred_prompt = "also bump the version"'
+  local out ctx
+  out="$(hook_input UserPromptSubmit d1 '{"prompt":"continue"}' | run_hook)"
+  assert_eq "$(jqv "$out" .hookSpecificOutput.hookEventName)" "UserPromptSubmit"
+  ctx="$(jqv "$out" .hookSpecificOutput.additionalContext)"
+  assert_contains "$ctx" "$LG_HOME/checkpoints/d1.md"
+  assert_contains "$ctx" "also bump the version"
+  local s; s="$(lg_session_get d1)"
+  assert_eq "$(jqv "$s" .status)" "active"
+  assert_eq "$(jqv "$s" '.needs_manual // false')" "false"
+  assert_eq "$(jqv "$s" '.deferred_prompt // "none"')" "none"
+  # Handed over once only.
+  out="$(hook_input UserPromptSubmit d1 '{"prompt":"thanks"}' | run_hook)"
+  assert_empty "$out"
+}
+
+test_an_idle_session_gets_no_resume_context() {
+  register_desktop d1
+  local out
+  out="$(hook_input UserPromptSubmit d1 '{"prompt":"hello"}' | run_hook)"
+  assert_empty "$out"
+}

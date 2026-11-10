@@ -61,7 +61,7 @@ lg_write_default_config() {
   else claude_bin="$(command -v claude 2>/dev/null || echo claude)"; fi
   cat > "$file" <<EOF
 # limit-guard configuration (sourced by bash). Values shown are the defaults.
-LG_PAUSE_5H=90          # pause when 5-hour usage reaches this %
+LG_PAUSE_5H=95          # pause when 5-hour usage reaches this %
 LG_PAUSE_7D=95          # pause when 7-day usage reaches this %
 LG_RESUME_GRACE=120     # seconds after the reset before resuming
 LG_HB_MIN=60            # shortest heartbeat

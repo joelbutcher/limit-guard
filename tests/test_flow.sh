@@ -12,7 +12,7 @@ test_end_to_end_pause_checkpoint_and_resume_after_reset() {
   mkdir -p "$TEST_ROOT/work"; echo '{"type":"assistant"}' > "$TEST_ROOT/work/hl.jsonl"
 
   # Usage climbs past the threshold (reported by the statusline).
-  statusline_input 91 "$R5" 40 "$R7" | "$LG" statusline >/dev/null
+  statusline_input 96 "$R5" 40 "$R7" | "$LG" statusline >/dev/null
   "$LG" tick >/dev/null
   assert_eq "$(lg_state_mode)" "paused"
   assert_eq "$(jq -r .resume_at "$LG_HOME/state.json")" "$((R5 + 120))"

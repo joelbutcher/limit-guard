@@ -10,14 +10,26 @@ lg_hook_paused_context() {
     "Claude plan usage: 5h \($u.five_hour.pct // "?")%, 7d \($u.seven_day.pct // "?")% (paused: \($s.reason // "manual")). Expected resume: \($until)."'
 }
 
+# Only tmux and headless sessions can be driven from outside; desktop and plain terminal ones need the user.
+lg_hook_auto_resumable() {
+  case "$(lg_session_get "$1" | jq -r '.kind // "terminal"' 2>/dev/null)" in
+    tmux|headless) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 lg_hook_deny_reason() {
-  local id="$1" cp
+  local id="$1" cp after
   cp="$(lg_checkpoint_path "$id")"
+  if lg_hook_auto_resumable "$id"; then
+    after="limit-guard will resume this session automatically after the reset and point you at the checkpoint."
+  else
+    after="After the reset the user will continue this session, and limit-guard will point you at the checkpoint then."
+  fi
   printf '%s' "limit-guard: work is paused to stay under the Claude plan usage limits. $(lg_hook_paused_context) \
 Do NOT start or continue any other work. Your only remaining actions: (1) write a concise checkpoint to $cp with the Write tool \
 covering the task goal, what is done, the exact next steps, files touched and any uncommitted or half-applied state; \
-(2) end your turn immediately with a one-line summary. limit-guard will resume this session automatically after the reset \
-and point you at the checkpoint."
+(2) end your turn immediately with a one-line summary. $after"
 }
 
 lg_hook_pretooluse() {
@@ -61,9 +73,25 @@ lg_hook_userpromptsubmit() {
   lg_session_update "$id" --argjson now "$(lg_now)" --arg p "$prompt" '
     .deferred_prompt = $p | .deferred_at = $now | .last_seen = $now
     | if (.status // "active") == "active" then .status = "deferred" else . end'
+  local after
+  if lg_hook_auto_resumable "$id"; then
+    after="Your prompt was saved and will be sent to this session automatically after the reset."
+  else
+    after="Your prompt was saved. After the reset, send any message (e.g. \"continue\") and it will be handed to the agent with its checkpoint."
+  fi
   jq -cn --arg r "limit-guard: paused to stay under the Claude plan usage limits. $(lg_hook_paused_context) \
-Your prompt was saved and will be sent to this session automatically after the reset. \
-To override now: limit-guard resume --force" '{decision: "block", reason: $r}'
+$after To override now: limit-guard resume --force" '{decision: "block", reason: $r}'
+}
+
+# First prompt typed into a session that limit-guard paused: hand over the checkpoint and any saved prompt.
+lg_hook_handover() {
+  local id="$1" s
+  s="$(lg_session_get "$id")"
+  [ -n "$s" ] || return 0
+  printf '%s' "$s" | jq -e '(.status | IN("paused","deferred","checkpoint_requested")) or .needs_manual == true' \
+    >/dev/null 2>&1 || return 0
+  jq -cn --arg c "$(lg_resume_prompt "$s")" \
+    '{hookSpecificOutput: {hookEventName: "UserPromptSubmit", additionalContext: $c}}'
 }
 
 lg_hook_sessionstart() {
@@ -106,10 +134,11 @@ lg_hook() {
       if [ "$mode" = "paused" ]; then
         lg_hook_userpromptsubmit "$input"
       else
-        # Someone is driving the session again: it no longer needs an automatic resume.
+        # Someone is driving the session again: hand over the checkpoint once, and drop any pending auto-resume.
+        lg_hook_handover "$id"
         lg_session_update "$id" --argjson now "$(lg_now)" '
-          .last_seen = $now | if (.status == "paused" or .status == "deferred" or .status == "checkpoint_requested")
-            then .status = "active" | .resumed_at = $now | del(.deferred_prompt) else . end'
+          .last_seen = $now | if (.status | IN("paused","deferred","checkpoint_requested")) or .needs_manual == true
+            then .status = "active" | .resumed_at = $now | del(.deferred_prompt) | del(.needs_manual) else . end'
       fi
       ;;
     Stop)

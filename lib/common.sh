@@ -5,7 +5,7 @@
 LG_HOME="${LG_HOME:-$HOME/.claude/limit-guard}"
 
 lg_defaults() {
-  : "${LG_PAUSE_5H:=90}"            # pause when 5-hour usage reaches this %
+  : "${LG_PAUSE_5H:=95}"            # pause when 5-hour usage reaches this %
   : "${LG_PAUSE_7D:=95}"            # pause when 7-day usage reaches this %
   : "${LG_RESUME_GRACE:=120}"       # seconds to wait after resets_at before resuming
   : "${LG_HB_MIN:=60}"              # shortest heartbeat (seconds)

@@ -15,9 +15,9 @@ test_below_thresholds_keeps_running_with_slow_heartbeat_when_far_away() {
 }
 
 test_heartbeat_tightens_as_usage_approaches_the_threshold() {
-  assert_eq "$(jqv "$(lg_decide "$(usage_rec 70 10)" '{"mode":"running"}' "$LG_NOW")" .next)" "300"
-  assert_eq "$(jqv "$(lg_decide "$(usage_rec 80 10)" '{"mode":"running"}' "$LG_NOW")" .next)" "120"
-  assert_eq "$(jqv "$(lg_decide "$(usage_rec 86 10)" '{"mode":"running"}' "$LG_NOW")" .next)" "60"
+  assert_eq "$(jqv "$(lg_decide "$(usage_rec 75 10)" '{"mode":"running"}' "$LG_NOW")" .next)" "300"
+  assert_eq "$(jqv "$(lg_decide "$(usage_rec 85 10)" '{"mode":"running"}' "$LG_NOW")" .next)" "120"
+  assert_eq "$(jqv "$(lg_decide "$(usage_rec 90 10)" '{"mode":"running"}' "$LG_NOW")" .next)" "60"
   assert_eq "$(jqv "$(lg_decide "$(usage_rec 20 90)" '{"mode":"running"}' "$LG_NOW")" .next)" "60"
   # no data: check again soon
   assert_eq "$(jqv "$(lg_decide null '{"mode":"running"}' "$LG_NOW")" .next)" "60"
@@ -25,10 +25,10 @@ test_heartbeat_tightens_as_usage_approaches_the_threshold() {
 
 test_five_hour_at_threshold_pauses_until_its_reset_plus_grace() {
   local d
-  d="$(lg_decide "$(usage_rec 90 50)" '{"mode":"running"}' "$LG_NOW")"
+  d="$(lg_decide "$(usage_rec 95 50)" '{"mode":"running"}' "$LG_NOW")"
   assert_eq "$(jqv "$d" .action)" "pause"
   assert_eq "$(jqv "$d" .resume_at)" "$((R5 + 120))"
-  assert_eq "$(jqv "$d" .reason)" "5h 90%"
+  assert_eq "$(jqv "$d" .reason)" "5h 95%"
 }
 
 test_both_windows_tripped_waits_for_the_later_reset() {
@@ -86,8 +86,13 @@ test_manual_pause_never_auto_resumes() {
 
 test_unknown_reset_time_rechecks_in_thirty_minutes() {
   local d u
-  u='{"source":"estimate","confidence":"low","observed_at":1794247000,"five_hour":{"pct":92,"resets_at":null},"seven_day":null}'
+  u='{"source":"estimate","confidence":"low","observed_at":1794247000,"five_hour":{"pct":96,"resets_at":null},"seven_day":null}'
   d="$(lg_decide "$u" '{"mode":"running"}' "$LG_NOW")"
   assert_eq "$(jqv "$d" .action)" "pause"
   assert_eq "$(jqv "$d" .resume_at)" "$((LG_NOW + 1800))"
+}
+
+test_five_hour_pauses_at_95_by_default_not_90() {
+  assert_eq "$LG_PAUSE_5H" "95"
+  assert_eq "$(jqv "$(lg_decide "$(usage_rec 94 50)" '{"mode":"running"}' "$LG_NOW")" .action)" "none"
 }

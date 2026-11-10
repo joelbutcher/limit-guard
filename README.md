@@ -43,7 +43,7 @@ limit-guard log -f          # what it decided and why
    high-confidence readings, and only uses this once a calibration exists. It is flagged
    `confidence: low`.
 
-**Decision.** limit-guard pauses when 5h ≥ `LG_PAUSE_5H` (default 90) or 7d ≥ `LG_PAUSE_7D` (default 95).
+**Decision.** limit-guard pauses when 5h ≥ `LG_PAUSE_5H` (default 95) or 7d ≥ `LG_PAUSE_7D` (default 95).
 `resume_at` is the latest reset among the tripped windows plus `LG_RESUME_GRACE`. After that time,
 fresh data that still shows a tripped window with a future reset extends the pause. Otherwise the
 clock is trusted (the window has rolled over) and every paused agent is resumed. A manual
@@ -60,7 +60,7 @@ daemon immediately.
 | --- | --- |
 | `PreToolUse` | Denies with a `permissionDecisionReason` telling the agent to write a checkpoint to `~/.claude/limit-guard/checkpoints/<session>.md` and end its turn. Writing that file (and `TodoWrite`) is allowed. |
 | `Stop` | An agent that was told to checkpoint is now `paused`. An agent that simply finished its turn is not resumed later. |
-| `UserPromptSubmit` | Blocks new prompts and saves them. The saved prompt is delivered on resume. |
+| `UserPromptSubmit` | Blocks new prompts and saves them. The saved prompt is delivered on resume. After the reset, the first prompt typed into a paused session is passed through with the checkpoint path and saved prompt added as context. |
 | `SessionStart` | Registers the session (pid, argv, kind, tmux pane) and injects a "paused" note. |
 | `SessionEnd` | Headless agents exit after pausing but stay resumable. |
 
@@ -81,8 +81,11 @@ Any hook failure exits 0 with no output, so a limit-guard bug can never block yo
   To resume with them, declare them in `config.env`, for example
   `LG_HEADLESS_RESUME_FLAGS="--permission-mode acceptEdits"`. A session blocked before its first
   turn is re-run fresh with its saved prompt.
-- **desktop app / plain terminal**: limit-guard can pause these but cannot type into them. It
-  sends a macOS notification naming them so you can continue them by hand.
+- **desktop app / plain terminal**: limit-guard can pause these but cannot type into them. The
+  desktop app's session tools live inside the app and only a Claude session can call them. It
+  sends a macOS notification naming them. Send any message (for example `continue`) and the hook
+  hands the agent its checkpoint and any prompt saved while paused. Agents in these sessions are
+  told the user will continue them, never that the resume is automatic.
 
 ## Install
 
