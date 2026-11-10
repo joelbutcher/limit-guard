@@ -145,3 +145,7 @@ tests/run.sh resume   # only tests whose name matches
 The tests stub `security`, `curl`, `tmux`, `claude` and `osascript`, and fix the clock with `LG_NOW`,
 so they never touch your real Claude setup or quota. The code is bash 3.2 compatible, matching
 macOS's `/bin/bash`.
+
+## License
+
+[MIT](LICENSE)
